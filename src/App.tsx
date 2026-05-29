@@ -403,32 +403,6 @@ export default function App() {
               <MarketMetric label="Risk reserve" value={stats ? compactCurrencyFormatter.format(stats.totalRiskBufferUsd) : "$0"} />
             </div>
 
-            <div className="product-grid" role="list" aria-label="Restaking products">
-              {products.map((product) => (
-                <button
-                  aria-pressed={selectedProduct.id === product.id}
-                  className={`product-card ${selectedProduct.id === product.id ? "is-selected" : ""}`}
-                  key={product.id}
-                  type="button"
-                  onClick={() => setSelectedProductId(product.id)}
-                >
-                  <span className="product-topline">
-                    <strong>{product.name}</strong>
-                    <span className={`risk-badge risk-badge--${product.risk.toLowerCase()}`}>{product.risk}</span>
-                  </span>
-                  <span className="product-tagline">{product.tagline}</span>
-                  <span className="product-yield">
-                    <b>{product.headlineApy.toFixed(2)}%</b>
-                    APY
-                  </span>
-                  <span className="product-meta">
-                    <span>{product.tokenOut}</span>
-                    <span>{product.exit}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-
             <div className="flow-ticker" aria-hidden="true">
               <span>ETH</span>
               <i />
@@ -464,8 +438,42 @@ export default function App() {
             confirmDeposit={confirmDeposit}
             walletConnected={walletConnected}
           />
+        </section>
 
-          <StrategyPanel product={selectedProduct} preview={preview} selectedAvs={selectedAvs} selectedOperator={selectedOperator} />
+        <section className="product-showcase" aria-labelledby="routes-title">
+          <div className="section-heading section-heading--wide">
+            <p>Strategies</p>
+            <h2 id="routes-title">Pick a route by outcome, not protocol plumbing.</h2>
+            <span>Each product abstracts operator selection, AVS coverage, receipt token behavior, exit timing, and reward sources.</span>
+          </div>
+          <div className="strategy-workbench">
+            <div className="product-grid" role="list" aria-label="Restaking products">
+              {products.map((product) => (
+                <button
+                  aria-pressed={selectedProduct.id === product.id}
+                  className={`product-card ${selectedProduct.id === product.id ? "is-selected" : ""}`}
+                  key={product.id}
+                  type="button"
+                  onClick={() => setSelectedProductId(product.id)}
+                >
+                  <span className="product-topline">
+                    <strong>{product.name}</strong>
+                    <span className={`risk-badge risk-badge--${product.risk.toLowerCase()}`}>{product.risk}</span>
+                  </span>
+                  <span className="product-tagline">{product.tagline}</span>
+                  <span className="product-yield">
+                    <b>{product.headlineApy.toFixed(2)}%</b>
+                    APY
+                  </span>
+                  <span className="product-meta">
+                    <span>{product.tokenOut}</span>
+                    <span>{product.exit}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <StrategyPanel product={selectedProduct} preview={preview} selectedAvs={selectedAvs} selectedOperator={selectedOperator} />
+          </div>
         </section>
 
         <section className="details-grid" id="portfolio">
