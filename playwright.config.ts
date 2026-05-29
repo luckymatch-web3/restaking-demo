@@ -20,7 +20,8 @@ export default defineConfig({
       timeout: 60_000
     },
     {
-      command: "npm run dev:web -- --host 127.0.0.1 --port 5188",
+      command:
+        "VITE_RESTAKE_VAULT_ADDRESS=0x1111111111111111111111111111111111111111 npm run dev:web -- --host 127.0.0.1 --port 5188",
       url: "http://127.0.0.1:5188",
       reuseExistingServer: true,
       timeout: 60_000

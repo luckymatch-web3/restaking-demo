@@ -70,6 +70,19 @@ type PreviewResponse = {
   preview: RestakePreview;
 };
 
+interface EthereumProvider {
+  request<T = unknown>(args: { method: string; params?: unknown[] | Record<string, unknown> }): Promise<T>;
+}
+
+declare global {
+  interface Window {
+    ethereum?: EthereumProvider;
+  }
+}
+
+const configuredVaultAddress = import.meta.env.VITE_RESTAKE_VAULT_ADDRESS?.trim() ?? "";
+const realVaultReady = /^0x[a-fA-F0-9]{40}$/.test(configuredVaultAddress);
+
 const products: EarnProduct[] = [
   {
     id: "core",
@@ -163,6 +176,7 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [walletMode, setWalletMode] = useState<"mock" | "real">("mock");
 
   useEffect(() => {
     void loadBootstrap();
@@ -232,13 +246,46 @@ export default function App() {
     setFlowError("");
 
     try {
-      const result = await requestJson<ConnectResponse>("/api/wallet/connect", {
-        body: JSON.stringify({ walletType: "demo" }),
-        method: "POST"
-      });
-      setBootstrap((current) => (current ? { ...current, wallet: result.wallet } : current));
-      const refreshed = await requestJson<BootstrapPayload>("/api/bootstrap");
-      setBootstrap(refreshed);
+      const provider = window.ethereum;
+      if (!provider) {
+        throw new Error("No browser wallet found. Install MetaMask, Rabby, or another EIP-1193 wallet to use real mode.");
+      }
+
+      const accounts = await provider.request<string[]>({ method: "eth_requestAccounts" });
+      const address = accounts[0];
+      if (!address) {
+        throw new Error("Wallet returned no account.");
+      }
+
+      const [chainId, balanceHex] = await Promise.all([
+        provider.request<string>({ method: "eth_chainId" }),
+        provider.request<string>({ method: "eth_getBalance", params: [address, "latest"] })
+      ]);
+      const ethBalance = weiHexToEth(balanceHex);
+
+      setWalletMode("real");
+      setBootstrap((current) =>
+        current
+          ? {
+              ...current,
+              activity: [],
+              assets: current.assets.map((asset) => ({
+                ...asset,
+                balance: asset.id === "eth" ? ethBalance : 0,
+                restaked: 0
+              })),
+              positions: [],
+              wallet: {
+                address,
+                balances: {
+                  eth: ethBalance
+                },
+                chain: formatChainName(chainId),
+                connected: true
+              }
+            }
+          : current
+      );
     } catch (error) {
       setFlowError(getErrorMessage(error));
     } finally {
@@ -258,6 +305,14 @@ export default function App() {
     setLastTxHash("");
 
     try {
+      if (walletMode === "real") {
+        if (!selectedAsset) {
+          throw new Error("Choose an asset before previewing.");
+        }
+        setPreview(buildRealPreview(request, selectedAsset, selectedProduct));
+        return;
+      }
+
       const result = await requestJson<PreviewResponse>("/api/restake/preview", {
         body: JSON.stringify(request),
         method: "POST"
@@ -282,6 +337,54 @@ export default function App() {
     setFlowError("");
 
     try {
+      if (walletMode === "real") {
+        const txHash = await submitRealDepositTransaction(request);
+        const confirmedPreview = preview;
+        const position: Position = {
+          amount: request.amount,
+          amountUsd: confirmedPreview.amountUsd,
+          assetId: request.assetId,
+          avsIds: request.avsIds,
+          id: `real-${Date.now()}`,
+          openedAt: new Date().toISOString(),
+          operatorId: request.operatorId,
+          projectedApy: confirmedPreview.projectedApy,
+          rewardsAccruedUsd: 0,
+          riskLevel: riskLevelFromProduct(selectedProduct),
+          status: "active"
+        };
+        const confirmedActivity: ActivityItem = {
+          createdAt: new Date().toISOString(),
+          description: `${request.amount.toFixed(4)} ${selectedAsset?.symbol ?? request.assetId} sent to configured vault.`,
+          id: `real-act-${Date.now()}`,
+          title: "On-chain transaction submitted",
+          txHash,
+          type: "restake_confirmed"
+        };
+
+        setBootstrap((current) =>
+          current
+            ? {
+                ...current,
+                activity: [confirmedActivity, ...current.activity],
+                assets: current.assets.map((asset) =>
+                  asset.id === request.assetId
+                    ? {
+                        ...asset,
+                        balance: roundClient(Math.max(0, asset.balance - request.amount), 6),
+                        restaked: roundClient(asset.restaked + request.amount, 6)
+                      }
+                    : asset
+                ),
+                positions: [position, ...current.positions]
+              }
+            : current
+        );
+        setLastTxHash(txHash);
+        setConfirmedKey(draftKey);
+        return;
+      }
+
       const result = await requestJson<ConfirmResponse>("/api/restake/confirm", {
         body: JSON.stringify(request),
         method: "POST"
@@ -307,6 +410,36 @@ export default function App() {
     } finally {
       setConfirming(false);
     }
+  }
+
+  async function submitRealDepositTransaction(request: RestakePreviewRequest) {
+    const provider = window.ethereum;
+    if (!provider) {
+      throw new Error("No browser wallet found. Reconnect MetaMask, Rabby, or another EIP-1193 wallet.");
+    }
+
+    if (!realVaultReady) {
+      throw new Error("Real deposit is disabled until VITE_RESTAKE_VAULT_ADDRESS is configured with a deployed vault contract.");
+    }
+
+    if (request.assetId !== "eth") {
+      throw new Error("Real on-chain deposit is currently enabled for native ETH only. LST deposits need token approval and a vault ABI.");
+    }
+
+    if (!wallet?.address) {
+      throw new Error("Connect a real wallet before confirming.");
+    }
+
+    return provider.request<string>({
+      method: "eth_sendTransaction",
+      params: [
+        {
+          from: wallet.address,
+          to: configuredVaultAddress,
+          value: ethToWeiHex(request.amount)
+        }
+      ]
+    });
   }
 
   function buildRestakeRequest(): RestakePreviewRequest | null {
@@ -431,11 +564,13 @@ export default function App() {
             preview={preview}
             previewing={previewing}
             product={selectedProduct}
+            realVaultReady={realVaultReady}
             selectedAsset={selectedAsset}
             selectedAssetId={selectedAssetId}
             setAmount={setAmount}
             setSelectedAssetId={setSelectedAssetId}
             confirmDeposit={confirmDeposit}
+            walletMode={walletMode}
             walletConnected={walletConnected}
           />
         </section>
@@ -519,11 +654,13 @@ function DepositPanel({
   preview,
   previewing,
   product,
+  realVaultReady,
   selectedAsset,
   selectedAssetId,
   setAmount,
   setSelectedAssetId,
   confirmDeposit,
+  walletMode,
   walletConnected
 }: {
   amount: string;
@@ -540,13 +677,25 @@ function DepositPanel({
   preview: RestakePreview | null;
   previewing: boolean;
   product: EarnProduct;
+  realVaultReady: boolean;
   selectedAsset?: Asset;
   selectedAssetId: string;
   setAmount: (amount: string) => void;
   setSelectedAssetId: (assetId: string) => void;
   confirmDeposit: () => Promise<void>;
+  walletMode: "mock" | "real";
   walletConnected: boolean;
 }) {
+  const balanceLabel = walletConnected
+    ? `Balance ${selectedAsset ? `${numberFormatter.format(selectedAsset.balance)} ${selectedAsset.symbol}` : "0"}`
+    : "Connect wallet to read live balance";
+  const finePrint =
+    walletMode === "real"
+      ? realVaultReady
+        ? "Real wallet mode. Confirm opens your wallet and submits an on-chain ETH transaction to the configured vault."
+        : "Real wallet mode. Preview uses your live ETH balance; set VITE_RESTAKE_VAULT_ADDRESS to enable real deposit transactions."
+      : "Demo mode. No real wallet signature, chain transaction, or funds movement will be submitted.";
+
   return (
     <aside className="deposit-panel" aria-labelledby="deposit-title">
       <div className="deposit-heading">
@@ -583,8 +732,8 @@ function DepositPanel({
           </select>
         </div>
         <p id="deposit-help">
-          Balance {selectedAsset ? `${numberFormatter.format(selectedAsset.balance)} ${selectedAsset.symbol}` : "0"}
-          <button type="button" onClick={() => setAmount(selectedAsset ? String(selectedAsset.balance) : "0")}>
+          {balanceLabel}
+          <button type="button" onClick={() => setAmount(walletConnected && selectedAsset ? String(selectedAsset.balance) : "0")}>
             Max
           </button>
         </p>
@@ -662,7 +811,7 @@ function DepositPanel({
         )}
       </div>
 
-      <p className="fine-print">Demo only. No real wallet signature, chain transaction, or funds movement will be submitted.</p>
+      <p className="fine-print">{finePrint}</p>
     </aside>
   );
 }
@@ -889,6 +1038,28 @@ function MarketMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function buildRealPreview(request: RestakePreviewRequest, asset: Asset, product: EarnProduct): RestakePreview {
+  const amountUsd = request.amount * asset.priceUsd;
+  const projectedApy = product.headlineApy;
+
+  return {
+    amount: request.amount,
+    amountUsd: roundClient(amountUsd, 2),
+    assetId: request.assetId,
+    avsIds: request.avsIds,
+    estimatedGasUsd: 0,
+    monthlyRewardUsd: roundClient((amountUsd * projectedApy) / 100 / 12, 2),
+    operatorFeeUsd: roundClient(amountUsd * 0.0008, 2),
+    operatorId: request.operatorId,
+    projectedApy,
+    protocolFeeUsd: roundClient(amountUsd * 0.0025, 2),
+    slashingExposurePct: product.risk === "Higher" ? 4.8 : product.risk === "Balanced" ? 3.1 : 2.2,
+    warnings: realVaultReady
+      ? ["Live wallet transaction required before any position is recorded."]
+      : ["No vault contract configured. Preview is read-only until VITE_RESTAKE_VAULT_ADDRESS is set."]
+  };
+}
+
 function SummaryTile({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
     <div className="summary-tile">
@@ -965,6 +1136,49 @@ function riskTone(risk: string) {
     return "balanced";
   }
   return "lower";
+}
+
+function riskLevelFromProduct(product: EarnProduct): Position["riskLevel"] {
+  if (product.risk === "Higher") {
+    return "high";
+  }
+
+  if (product.risk === "Balanced") {
+    return "medium";
+  }
+
+  return "low";
+}
+
+function formatChainName(chainId: string) {
+  const knownChains: Record<string, string> = {
+    "0x1": "Ethereum Mainnet",
+    "0x5": "Goerli",
+    "0xaa36a7": "Sepolia",
+    "0x89": "Polygon",
+    "0xa": "Optimism",
+    "0xa4b1": "Arbitrum One",
+    "0x2105": "Base"
+  };
+
+  return knownChains[chainId.toLowerCase()] ?? `Chain ${Number.parseInt(chainId, 16)}`;
+}
+
+function weiHexToEth(hex: string) {
+  const wei = BigInt(hex);
+  return Number(wei) / 1e18;
+}
+
+function ethToWeiHex(amount: number) {
+  const [wholePart, decimalPart = ""] = amount.toString().split(".");
+  const wholeWei = BigInt(wholePart || "0") * 10n ** 18n;
+  const decimalWei = BigInt((decimalPart.padEnd(18, "0").slice(0, 18) || "0"));
+  return `0x${(wholeWei + decimalWei).toString(16)}`;
+}
+
+function roundClient(value: number, decimals: number) {
+  const multiplier = 10 ** decimals;
+  return Math.round(value * multiplier) / multiplier;
 }
 
 function getErrorMessage(error: unknown) {
