@@ -1,0 +1,11 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+.playwright-mcp/
+pwame/
+artifacts/
+ref-*.png
+restake-current-*.png
+.DS_Store
+._*
